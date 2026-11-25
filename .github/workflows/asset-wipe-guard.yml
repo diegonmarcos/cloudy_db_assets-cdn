@@ -1,0 +1,54 @@
+# Asset-wipe guard (#1913): RED when a commit deletes more than 50 files under
+# b-Media, b_Media or b-Projects. Commit 061b002f8 (2026-10-04) was made with an empty index
+# and removed the whole tree; every page lost its images until f91e3f869 restored it.
+# The check reads trees only; the checkout is blob-less and sparse.
+# self-test: throwaway repos prove a wipe goes RED and ordinary deletes stay green (mutation).
+# workflow_dispatch mutation=wipe: builds a local commit removing 60 asset paths from the
+# index and checks it; that run MUST be red. Nothing is pushed.
+name: Asset wipe guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      mutation:
+        description: "wipe = check a local commit that drops 60 asset paths (must go RED)"
+        required: false
+        default: "none"
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          sparse-checkout: .github
+      - name: Self-test (tester plus mutation)
+        run: bash .github/scripts/guard-asset-wipe.sh --self-test
+      - name: Guard the pushed range
+        if: github.event.inputs.mutation != 'wipe'
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"; head="${{ github.event.pull_request.head.sha }}"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            base="${{ github.event.before }}"; head="${{ github.sha }}"
+          else base="HEAD~1"; head="HEAD"; fi
+          bash .github/scripts/guard-asset-wipe.sh "$base" "$head"
+      - name: Mutation wipe (must be red)
+        if: github.event.inputs.mutation == 'wipe'
+        run: |
+          git config user.email ci@example.invalid; git config user.name ci
+          export GIT_INDEX_FILE=$(mktemp -u)
+          git read-tree HEAD
+          git ls-tree -r --name-only HEAD -- b-Media b_Media b-Projects | head -60 | xargs git update-index --force-remove
+          tree=$(git write-tree)
+          wipe=$(git commit-tree "$tree" -p HEAD -m wipe)
+          unset GIT_INDEX_FILE
+          bash .github/scripts/guard-asset-wipe.sh HEAD "$wipe"
